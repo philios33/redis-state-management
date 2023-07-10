@@ -5,11 +5,11 @@ import { GenericMessage, GenericMessageWithId } from "../types";
 
 export class RedisQueuesController {
 
-    redis: Redis;
+    rrc: ReliableRedisClient;
     namespace: string;
 
     constructor(rrc: ReliableRedisClient, namespace: string) {
-        this.redis = rrc.getClient();
+        this.rrc = rrc;
         this.namespace = namespace;
     }
 
@@ -24,11 +24,18 @@ export class RedisQueuesController {
 
     async pushMessage(queueId: string, message: GenericMessage): Promise<number> {
         // LPUSH queue xxx
-        return await this.redis.lpush(this.namespace + "-Q-" + queueId, this._serialize(message));
+        const redis = await this.rrc.getClient();
+        const value = await redis.lpush(this.namespace + "-Q-" + queueId, this._serialize(message));
+
+        // PUB/SUB logic for triggering queues
+        const channelId = this.namespace + "-Q-" + queueId + "-CHANNEL";
+        await redis.publish(channelId, "PUSH");
+
+        return value;
     }
 
     async popNextMessage(queueId: string): Promise<GenericMessageWithId | null> {
-
+        const redis = await this.rrc.getClient();
         // OLD Method
         /*
         // RPOP queue
@@ -44,18 +51,18 @@ export class RedisQueuesController {
         const processingListName = this.namespace + "-QP-" + queueId;
 
         // Before we try to pop the next message, check the processing list is empty, otherwise push back on to the end of the queue
-        let processingLength = await this.redis.llen(processingListName);
+        let processingLength = await redis.llen(processingListName);
         if (processingLength > 0) {
             do {
                 console.warn("There are " + processingLength + " unprocessed messages in queue " + queueId + ", re-pushing them now...");
-                await this.redis.lmove(processingListName, queueListName, "LEFT", "RIGHT");
+                await redis.lmove(processingListName, queueListName, "LEFT", "RIGHT");
 
-                processingLength = await this.redis.llen(processingListName);
+                processingLength = await redis.llen(processingListName);
             } while(processingLength > 0);
 
         }
 
-        const next = await this.redis.lmove(queueListName, processingListName, "RIGHT", "LEFT");
+        const next = await redis.lmove(queueListName, processingListName, "RIGHT", "LEFT");
         if (next === null) {
             return null;
         } else {
@@ -67,7 +74,8 @@ export class RedisQueuesController {
     }
 
     async confirmMessageById(queueId: string, messageId: string) {
-        const removed = await this.redis.lrem(this.namespace + "-QP-" + queueId, 1, messageId);
+        const redis = await this.rrc.getClient();
+        const removed = await redis.lrem(this.namespace + "-QP-" + queueId, 1, messageId);
         if (removed !== 1) {
             console.error("Could not confirm message: " + messageId);
             console.error("A processor tried to remove a message from the processsing queue that is not there.");
@@ -76,9 +84,66 @@ export class RedisQueuesController {
         }
     }
 
+    async hangConnectionUntilNextMessageOrCancelled(queueId: string, control: {isCancelled: boolean}) {
+        const redis = await this.rrc.getClient();
+        const client = redis.duplicate();
+        await client.connect();
+
+        return new Promise((resolve, reject) => {
+
+            const cancelledInterval = setInterval(() => {
+                if (control.isCancelled) {
+                    finish(new Error("Listening cancelled"));
+                }
+            }, 1000);
+
+            let isFinished = false;
+            const finish = (error: any, result?: any) => {
+                if (!isFinished) {
+                    isFinished = true;
+
+                    clearInterval(cancelledInterval);
+
+                    // No need to unsubscribe, just quit and throw away this client
+                    client.quit(() => {
+                        if (error) {
+                            reject(error);
+                        } else {
+                            resolve(result);
+                        }
+                    });
+                }
+            }
+
+            try {
+                client.on("message", (channel, message) => {
+                    finish(null, message);
+                });
+                client.subscribe(this.namespace + "-Q-" + queueId + "-CHANNEL", (error) => {
+                    if (error) {
+                        finish(error);
+                    }
+                });
+
+            } catch(e) {
+                reject(e);
+            }
+        })
+    }
+
+    async deleteQueue(queueId: string) {
+        const queueListName = this.namespace + "-Q-" + queueId;
+        const processingListName = this.namespace + "-QP-" + queueId;
+
+        const redis = await this.rrc.getClient();
+        await redis.del(queueListName);
+        await redis.del(processingListName);
+    }
+
     async getQueueSize(queueId: string): Promise<number> {
         // LLEN queue
-        return await this.redis.llen(this.namespace + "-Q-" + queueId);
+        const redis = await this.rrc.getClient();
+        return await redis.llen(this.namespace + "-Q-" + queueId);
     }
 
     private _serialize(message: GenericMessage) : string {

@@ -13,7 +13,7 @@ export interface IMessage<T,M> {
 export type GenericMessage = IMessage<string, any>;
 
 export type GenericMessageWithId = {
-    id: string
+    id: string // This IS necessary to allow for message confirmation, but is left up to the implementation to store or not.
     message: GenericMessage
 }
 

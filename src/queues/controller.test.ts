@@ -9,7 +9,7 @@ describe("Test Queue Controller", () => {
 
     beforeAll(async () => {
         rrc = new ReliableRedisClient("Test", "localhost", 6379);
-        await rrc.connect();
+        await rrc.start();
         rqc = new RedisQueuesController(rrc, "test");
     })
 
@@ -134,7 +134,7 @@ describe("Test Queue Controller", () => {
     })
     
 
-    afterAll(async () => {
-        await rrc.shutdown();
+    afterAll(() => {
+        rrc.stop();
     });
 })

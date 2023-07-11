@@ -85,9 +85,17 @@ export class RedisQueuesController {
     }
 
     async hangConnectionUntilNextMessageOrCancelled(queueId: string, control: {isCancelled: boolean}) {
-        const redis = await this.rrc.getClient();
+        const redis = this.rrc.getClient();
+        // console.log("Creating a new duplicate connection!");
         const client = redis.duplicate();
-        await client.connect();
+
+        try {
+            await client.connect();
+        } catch(e: any) {
+            // First connect failed, cleanup this failed connection
+            client.disconnect(false);
+            throw e;
+        }
 
         return new Promise((resolve, reject) => {
 
@@ -105,17 +113,26 @@ export class RedisQueuesController {
                     clearInterval(cancelledInterval);
 
                     // No need to unsubscribe, just quit and throw away this client
-                    client.quit(() => {
-                        if (error) {
-                            reject(error);
-                        } else {
-                            resolve(result);
-                        }
-                    });
+                    client.removeAllListeners();
+                    client.disconnect(false);
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve(result);
+                    }
                 }
             }
 
             try {
+                client.on("error", (e) => {
+                    console.warn("Queues Controller listener client ERROR, shutting down", e);
+                    finish(e);
+                });
+                client.on("reconnecting", () => {
+                    console.warn("Queues Controller listener client RECONNECTING detected, shutting down");
+                    finish(new Error("Reconnecting detected"));
+                });
+                
                 client.on("message", (channel, message) => {
                     finish(null, message);
                 });
@@ -126,7 +143,7 @@ export class RedisQueuesController {
                 });
 
             } catch(e) {
-                reject(e);
+                finish(e);
             }
         })
     }

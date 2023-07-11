@@ -51,7 +51,7 @@ export class RedisStorageProcessor {
         return serialize(v);
     }
 
-    private _calculateDiff(obj1: any, obj2: any) : any {
+    private _calculateDiff(obj1: any, obj2: any) : Array<any> {
         return compare(obj1, obj2);
     }
 
@@ -89,10 +89,15 @@ export class RedisStorageProcessor {
             }
         } while (value !== null);
 
-        // Then we set the lock using a TTL of 60 seconds, every 30 seconds.
+        // Then we set the lock using a TTL of 30 seconds, every 20 seconds.
         const setHeartbeat = async () => {
             if (this.redis !== null) {
-                await this.redis.setex(lockKey, 60, this.instanceId);
+                try {
+                    await this.redis.setex(lockKey, 30, this.instanceId);
+                } catch(e) {
+                    // Don't clog logs up if redis is down
+                    // console.warn(e);
+                }
             }
         }
         
@@ -108,7 +113,7 @@ export class RedisStorageProcessor {
 
         this.lockingHeartbeat = setInterval(() => {
             setHeartbeat();
-        }, 30 * 1000);
+        }, 20 * 1000);
 
         // We have a single execution loop that just repeats always but hangs a bit when it cannot proceed
         // Other events can triggerWaitingCycle to attempt to unclog the main loop, but it will only succeed if it is waiting
@@ -157,10 +162,6 @@ export class RedisStorageProcessor {
             if (this.isPaused) {
                 throw new Error("Is paused");
             }
-    
-            if (!this.rrc.isConnected) {
-                throw new Error("Not connected to redis yet");
-            }
         
             // Continuously attempt to get the next message and process it by writing the values to the target
             let isMoreMessages = true;
@@ -169,13 +170,26 @@ export class RedisStorageProcessor {
                     return;
                 }
 
-                const nextMessage = await this.queues.popNextMessage(this.incomingQueueId);
-                if (nextMessage === null) {
-                    // console.log("No more messages...");
-                    isMoreMessages = false;
-                } else {
-                    // console.log("Handling message " + nextMessage.id);
-                    await this.processRedisStorageMessage(nextMessage);
+                try {
+                    const nextMessage = await this.queues.popNextMessage(this.incomingQueueId);
+                    if (nextMessage === null) {
+                        console.log("No more messages...");
+                        isMoreMessages = false;
+                    } else {
+                        console.log("Handling message " + nextMessage.id);
+                        await this.processRedisStorageMessage(nextMessage);
+                    }
+                } catch(e: any) {
+
+                    // Even if it is connection error, this can get thrown to the large 300 wait routine since a reconnect will retrigger it anyway
+                    throw e;
+                    /*
+                    if (/^Stream isn\'t writeable/.test(e.message)) {
+                        await this.sleep(5000);
+                    } else {
+                        throw e;
+                    }
+                    */
                 }
             }
 
@@ -204,7 +218,7 @@ export class RedisStorageProcessor {
             } catch(e: any) {
                 // console.log("WAITING THREW AN ERROR: " + e.message);
                 // We catch this error on timeout or connection error, because we can handle both things by just repeating the loop anyway
-                console.warn(e);
+                console.warn(e.message);
             }
             clearTimeout(cancelTimeout);
             clearInterval(cancelInterval);
@@ -251,29 +265,36 @@ export class RedisStorageProcessor {
                 oldState = current.value;
             }
 
-            // Write next value
-            const now = (new Date()).toISOString();
-            if (JSON.stringify(value) == "{}") { 
-                // Special value meaning delete the variable
-                await this.redis.del(key);
-            } else {
-                const newStateVersion: StateVersion<any> = {
-                    version: nextVersion,
-                    value: value,
-                    writtenAt: now,
-                }
-                await this.redis.set(key, this._serialize(newStateVersion));
-            }
-
-            // Publish diff
             const deltaPayload = this._calculateDiff(oldState, value);
-            const diffMsg: DiffMessage = {
-                fromVersion: nextVersion - 1,
-                toVersion: nextVersion,
-                writtenAt: now,
-                deltaPayload: deltaPayload,
+            if (deltaPayload.length === 0) {
+                // No changes, do nothing here
+                // Don't even need to make a new version since this write is a no-op
+                // Don't return here because we need to confirm the message
+            } else {
+                // There ARE changes
+                // Write next value
+                const now = (new Date()).toISOString();
+                if (JSON.stringify(value) === "{}") { 
+                    // Special value meaning delete the variable
+                    await this.redis.del(key);
+                } else {
+                    const newStateVersion: StateVersion<any> = {
+                        version: nextVersion,
+                        value: value,
+                        writtenAt: now,
+                    }
+                    await this.redis.set(key, this._serialize(newStateVersion));
+                }
+
+                // Publish diff
+                const diffMsg: DiffMessage = {
+                    fromVersion: nextVersion - 1,
+                    toVersion: nextVersion,
+                    writtenAt: now,
+                    deltaPayload: deltaPayload,
+                }
+                await this.redis.publish(deltaUpdatesChannelId, this._serialize(diffMsg));
             }
-            await this.redis.publish(deltaUpdatesChannelId, this._serialize(diffMsg));
 
         } else if (message.message.type === "WRITE_HASHMAP_VALUE") {
             const key = this.namespace + "-MAP-" + message.message.meta.key;

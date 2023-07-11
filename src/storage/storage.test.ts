@@ -17,7 +17,7 @@ describe("Test Storage Integration", () => {
 
     beforeAll(async () => {
         rrc = new ReliableRedisClient("Test", "localhost", 6379);
-        await rrc.connect();
+        await rrc.start();
 
         const namespace = "TEST";
         const processingQueueId = "PROCESSING";
@@ -28,7 +28,7 @@ describe("Test Storage Integration", () => {
 
         // Also we need to remove the lock key from previous tests
         const lockKey = "STORAGE_PROCESSOR_" + namespace;
-        (await rrc.getClient()).del(lockKey);
+        rrc.getClient().del(lockKey);
 
         reader = new RedisStorageStateReader(rrc, namespace);
         writer = new RedisStorageStateWriter(rrc, namespace, processingQueueId);
@@ -132,6 +132,9 @@ describe("Test Storage Integration", () => {
             fullCallbacks.push(full);
         }, (delta: any) => {
             deltaCallbacks.push(delta);
+        }, (error: any) => {
+            expect(true).toEqual(false);
+            console.error(error);
         });
 
         await processor.sleep(1000);
@@ -170,7 +173,7 @@ describe("Test Storage Integration", () => {
 
     afterAll(async () => {
         await processor.stop();
-        rrc.shutdown();
+        rrc.stop();
     });
 
 });

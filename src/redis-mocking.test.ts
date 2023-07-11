@@ -10,8 +10,8 @@ describe("Test Redis Mocking", () => {
 
     beforeAll(async () => {
         rrc = new ReliableRedisClient("Test", "localhost", 6379);
-        await rrc.connect();
-        client = await rrc.getClient();
+        await rrc.start();
+        client = rrc.getClient();
         await client.del("test");
         await client.del("list");
     })
@@ -35,7 +35,7 @@ describe("Test Redis Mocking", () => {
         expect(new Set(await client.smembers("list"))).toEqual(new Set(['one', 'two', 'three', 'four']));
     });
 
-    afterAll(async () => {
-        await rrc.shutdown();
+    afterAll(() => {
+        rrc.stop();
     });
 })

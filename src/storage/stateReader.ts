@@ -83,36 +83,84 @@ export class RedisStorageStateReader {
 
     // TODO No LIST functionality yet, perhaps we will need that
 
-    async fetchStateAndListen<T>(key: string, fullCallback: (full: StateVersion<T>) => void, deltaCallback: (delta: DiffMessage) => void): Promise<() => void> {
-        const client = (await this.rrc.getClient()).duplicate();
-        await client.connect();
-
-        let currentVersion: null | number = null;
-
-        const deltaUpdatesChannelId = this.namespace + "-STATE-" + key + "-DELTA";
-        client.on("message", (channel, message) => {
-            const diff = this._unserialize<DiffMessage>(message);
-            if (diff.fromVersion === currentVersion) {
-                deltaCallback(diff);
-            } else {
-                console.warn("Ignoring delta from version: " + diff.fromVersion + " since we have current version " + currentVersion);
-            }
-        });
-        await client.subscribe(deltaUpdatesChannelId);
-
-        const current = await this.readStateObj<T>(key);
-        if (current === null) {
-            throw new Error("Missing state object: " + key);
+    async fetchStateAndListen<T>(key: string, fullCallback: (full: StateVersion<T>) => void, deltaCallback: (delta: DiffMessage) => void, errorCallback: (error: any) => void): Promise<() => void> {
+        // console.log("Duplicating new client");
+        const client = this.rrc.getClient().duplicate();
+        try {
+            await client.connect();
+        } catch(e: any) {
+            // First connect failed, cleanup the duplicate client
+            client.disconnect(false);
+            throw e;
         }
-        currentVersion = current.version;
-        fullCallback(current);
 
-        return () => {
-            // Unsubscribe
-            // Just kill the connection
+        // Connected here
+        const cleanupClient = () => {
+            // console.log("Cleaning up client");
+            client.removeAllListeners();
             client.disconnect(false);
         }
+        const handleError = (error: any) => {
+            try {
+                errorCallback(error);
+            } catch(e: any) {
+                console.error("Error in error callback", e);
+            }
+        }
+
+        try {
+            let currentVersion: null | number = null;
+
+            const deltaUpdatesChannelId = this.namespace + "-STATE-" + key + "-DELTA";
+            client.on("message", (channel, message) => {
+                try {
+                    const diff = this._unserialize<DiffMessage>(message);
+                    if (diff.fromVersion === currentVersion) {
+                        currentVersion = diff.toVersion;
+                        deltaCallback(diff);
+                    } else {
+                        console.warn("Ignoring delta from version: " + diff.fromVersion + " since we have current version " + currentVersion);
+                    }
+                } catch(e: any) {
+                    cleanupClient();
+                    handleError(e);
+                }
+            });
+
+            const initialise = async () => {
+                // console.log("Subscribing client");
+                await client.subscribe(deltaUpdatesChannelId);
+                const current = await this.readStateObj<T>(key);
+                if (current === null) {
+                    throw new Error("Missing state object: " + key);
+                }
+                currentVersion = current.version;
+                fullCallback(current);
+            }
+            await initialise();
+            let isInitialised = true;
+
+            // Setup a reconnection handler here
+            client.on("ready", () => {
+                // This event fires when the client gets reconnected.
+                if (!isInitialised) {
+                    initialise().then(() => {
+                        isInitialised = true;
+                    });
+                }
+            });
+            client.on("reconnecting", () => {
+                isInitialised = false;
+            })
+            
+        } catch(e: any) {
+            cleanupClient();
+            throw e;
+        }
+
+        return () => {
+            handleError(new Error("Unsubscribed"));
+            cleanupClient();
+        }
     }
-
-
 }

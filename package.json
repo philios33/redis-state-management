@@ -1,6 +1,6 @@
 {
   "name": "redis-state-management",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "This is a collection of utility classes to help speak to a Redis backed storage engine.",
   "main": "index.js",
   "dependencies": {
